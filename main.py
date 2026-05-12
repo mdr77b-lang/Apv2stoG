@@ -132,9 +132,7 @@ def test_real_server(link, idx):
             "protocol": "socks",
             "settings": {"udp": True}
         }],
-        "outbounds": [{
-            "protocol": "freedom"
-        }]
+"outbounds": [parse_link(link)]
     }
 
     # هنا ضع parse الحقيقي الخاص بك
