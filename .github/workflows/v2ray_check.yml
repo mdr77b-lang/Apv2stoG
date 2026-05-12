@@ -2,10 +2,8 @@ name: V2Ray Daily Checker
 
 on:
   schedule:
-    # تشغيل مرة يومياً الساعة 03:00 UTC
     - cron: '0 3 * * *'
 
-  # تشغيل يدوي عند الحاجة
   workflow_dispatch:
 
 concurrency:
@@ -18,7 +16,6 @@ jobs:
 
     runs-on: ubuntu-latest
 
-    # أقل من حد GitHub الأقصى
     timeout-minutes: 330
 
     permissions:
@@ -26,26 +23,14 @@ jobs:
 
     steps:
 
-      # =========================
-      # تحميل المستودع
-      # =========================
-
       - name: Checkout Repository
         uses: actions/checkout@v4
-
-      # =========================
-      # Python
-      # =========================
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
-
-      # =========================
-      # استرجاع الكاش
-      # =========================
 
       - name: Restore Cache
         uses: actions/cache/restore@v4
@@ -58,35 +43,19 @@ jobs:
           restore-keys: |
             v2ray-cache
 
-      # =========================
-      # تثبيت المكتبات
-      # =========================
-
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
           pip install requests google-api-python-client google-auth
 
-      # =========================
-      # صلاحيات Xray
-      # =========================
-
       - name: Make Xray Executable
         run: |
           chmod +x ./xray_core/xray
-
-      # =========================
-      # إنشاء مجلدات التشغيل
-      # =========================
 
       - name: Prepare Runtime
         run: |
           mkdir -p runtime
           mkdir -p cache
-
-      # =========================
-      # تشغيل الفحص
-      # =========================
 
       - name: Run V2Ray Checker
         run: |
@@ -94,21 +63,13 @@ jobs:
         env:
           PYTHONUNBUFFERED: "1"
 
-      # =========================
-      # رفع النتائج إلى Google Drive
-      # =========================
-
       - name: Sync To Google Drive
         run: |
           python gdrive_sync.py
         env:
           GDRIVE_SERVICE_ACCOUNT: ${{ secrets.GDRIVE_SERVICE_ACCOUNT }}
 
-      # =========================
-      # حفظ الكاش
-      # =========================
-
-            - name: Save Cache
+      - name: Save Cache
         uses: actions/cache/save@v4
         with:
           path: |
