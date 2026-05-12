@@ -48,9 +48,19 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests google-api-python-client google-auth
 
-      - name: Make Xray Executable
+      - name: Download Xray
         run: |
-          chmod +x ./xray_core/xray
+          mkdir -p xray_core
+          cd xray_core
+
+          wget -O xray.zip \
+          https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
+
+          unzip xray.zip
+
+          chmod +x xray
+
+          ls -lah
 
       - name: Prepare Runtime
         run: |
