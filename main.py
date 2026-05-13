@@ -1,370 +1,294 @@
-import os
-import json
-import time
-import socket
-import random
-import asyncio
-import tempfile
-import subprocess
-import concurrent.futures
-import requests
-import base64
-
+import json,base64,requests,time,subprocess,os,concurrent.futures,threading
 from urllib.parse import unquote
 
-XRAY_BIN = "xray.exe" if os.name == "nt" else "xray"
-XRAY = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "xray_core",
-    XRAY_BIN
-)
-
-MAX_XRAY_WORKERS = 5
-FAST_TIMEOUT = 2
-REAL_TIMEOUT = 3
-BATCH_SIZE = 500
-
-CACHE_FILE = "good_cache.json"
-BLACKLIST_FILE = "dead_cache.json"
-
-# =========================
-# Utils
-# =========================
+XRAY_BIN = "xray.exe" if os.name == 'nt' else "xray"
+XRAY=os.path.join(os.path.dirname(os.path.abspath(__file__)),"xray_core",XRAY_BIN)
 
 def b64d(s):
-    s = s.strip() + "=="
-    try:
-        return base64.b64decode(s).decode("utf-8", errors="ignore")
+    s=s.strip()+'=='
+    try: return base64.b64decode(s).decode('utf-8',errors='ignore')
     except:
-        try:
-            return base64.urlsafe_b64decode(s).decode("utf-8", errors="ignore")
-        except:
-            return ""
+        try: return base64.urlsafe_b64decode(s).decode('utf-8',errors='ignore')
+        except: return ""
 
-# =========================
-# Parse Links
-# =========================
-
-def extract_host_port(link):
+def parse_vmess(link):
     try:
-        if "@" not in link:
-            return None
+        d=json.loads(b64d(link[8:]))
+        net=d.get("net","tcp")
+        obj={
+            "protocol":"vmess",
+            "settings":{"vnext":[{"address":d["add"],"port":int(d.get("port",443)),"users":[{"id":d["id"],"alterId":int(d.get("aid",0)),"security":"auto"}]}]},
+            "streamSettings":{"network":net}
+        }
+        if d.get("tls")=="tls":
+            obj["streamSettings"]["security"]="tls"
+            obj["streamSettings"]["tlsSettings"]={"serverName":d.get("sni") or d.get("host") or d["add"],"allowInsecure":True}
+        if net=="ws":
+            obj["streamSettings"]["wsSettings"]={"path":d.get("path","/"),"headers":{"Host":d.get("host","")}}
+        elif net=="grpc":
+            obj["streamSettings"]["grpcSettings"]={"serviceName":d.get("path","")}
+        return obj
+    except: return None
 
-        hp = link.split("@", 1)[1]
-
-        if "?" in hp:
-            hp = hp.split("?", 1)[0]
-
-        if "#" in hp:
-            hp = hp.split("#", 1)[0]
-
-        host, port = hp.rsplit(":", 1)
-
-        return host.strip(), int(port)
-
-    except:
-        return None
-
-# =========================
-# Async Fast Filter
-# =========================
-
-async def tcp_ping(host, port):
-
+def parse_vless(link):
     try:
-        fut = asyncio.open_connection(host, port)
+        r=link[8:]
+        if '#' in r: r=r.rsplit('#',1)[0]
+        uid,hp=r.split('@',1)
+        if '?' in hp: ap,qs=hp.split('?',1)
+        else: ap,qs=hp,''
+        ps=ap.rsplit(':',1)
+        addr,port=ps[0],int(ps[1]) if len(ps)>1 else 443
+        pm=dict(x.split('=',1) for x in qs.split('&') if '=' in x) if qs else {}
+        net=pm.get('type','tcp'); sec=pm.get('security','none')
+        sni=pm.get('sni',''); fp=pm.get('fp','')
+        ob={"protocol":"vless","settings":{"vnext":[{"address":addr,"port":port,"users":[{"id":uid,"encryption":"none"}]}]},"streamSettings":{"network":net}}
+        fl=pm.get('flow','')
+        if fl: ob["settings"]["vnext"][0]["users"][0]["flow"]=fl
+        if sec=="tls":
+            ob["streamSettings"]["security"]="tls"
+            ob["streamSettings"]["tlsSettings"]={"serverName":sni or addr,"allowInsecure":True}
+            if fp: ob["streamSettings"]["tlsSettings"]["fingerprint"]=fp
+        elif sec=="reality":
+            ob["streamSettings"]["security"]="reality"
+            rs={"serverName":sni or addr,"show":False}
+            if fp: rs["fingerprint"]=fp
+            if pm.get('pbk'): rs["publicKey"]=pm["pbk"]
+            if pm.get('sid'): rs["shortId"]=pm["sid"]
+            ob["streamSettings"]["realitySettings"]=rs
+        if net=="ws":
+            h=pm.get('host','')
+            ob["streamSettings"]["wsSettings"]={"path":unquote(pm.get('path','/')),"headers":{"Host":h} if h else {}}
+        elif net=="grpc":
+            ob["streamSettings"]["grpcSettings"]={"serviceName":pm.get('serviceName','')}
+        return ob
+    except: return None
 
-        reader, writer = await asyncio.wait_for(
-            fut,
-            timeout=FAST_TIMEOUT
-        )
-
-        writer.close()
-
-        try:
-            await writer.wait_closed()
-        except:
-            pass
-
-        return True
-
-    except:
-        return False
-
-async def fast_filter(links):
-
-    good = []
-
-    sem = asyncio.Semaphore(100)
-
-    async def worker(link):
-
-        async with sem:
-
-            hp = extract_host_port(link)
-
-            if not hp:
-                return
-
-            host, port = hp
-
-            ok = await tcp_ping(host, port)
-
-            if ok:
-                good.append(link)
-
-    await asyncio.gather(*(worker(x) for x in links))
-
-    return good
-
-# =========================
-# Xray Real Check
-# =========================
-
-def test_real_server(link, idx):
-
-    port = 10000 + idx
-
-    cfg = {
-        "inbounds": [{
-            "port": port,
-            "listen": "127.0.0.1",
-            "protocol": "socks",
-            "settings": {"udp": True}
-        }],
-"outbounds": [parse_link(link)]
-    }
-
-    # هنا ضع parse الحقيقي الخاص بك
-    # للحفاظ على طول الرد اختصرته
-    # استبدل freedom بـ parse_link(link)
-
+def parse_trojan(link):
     try:
+        r=link[9:]
+        if '#' in r: r=r.rsplit('#',1)[0]
+        pw,hp=r.split('@',1)
+        if '?' in hp: ap,qs=hp.split('?',1)
+        else: ap,qs=hp,''
+        ps=ap.rsplit(':',1)
+        addr,port=ps[0],int(ps[1]) if len(ps)>1 else 443
+        pm=dict(x.split('=',1) for x in qs.split('&') if '=' in x) if qs else {}
+        net=pm.get('type','tcp')
+        ob={
+            "protocol":"trojan",
+            "settings":{"servers":[{"address":addr,"port":port,"password":unquote(pw)}]},
+            "streamSettings":{"network":net,"security":"tls","tlsSettings":{"serverName":pm.get('sni') or addr,"allowInsecure":True}}
+        }
+        if net=="ws":
+            ob["streamSettings"]["wsSettings"]={"path":unquote(pm.get('path','/')),"headers":{"Host":pm.get('host','')}}
+        elif net=="grpc":
+            ob["streamSettings"]["grpcSettings"]={"serviceName":pm.get('serviceName','')}
+        return ob
+    except: return None
 
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            delete=False,
-            suffix=".json"
-        ) as tf:
+def parse_hysteria2(link):
+    try:
+        prefix = "hysteria2://" if link.startswith("hysteria2://") else "hy2://"
+        r = link[len(prefix):]
+        if '#' in r: r = r.rsplit('#', 1)[0]
+        auth, hp = r.split('@', 1)
+        if '?' in hp: ap, qs = hp.split('?', 1)
+        else: ap, qs = hp, ''
+        ps = ap.rsplit(':', 1)
+        addr, port = ps[0], int(ps[1]) if len(ps) > 1 else 443
+        pm = dict(x.split('=', 1) for x in qs.split('&') if '=' in x) if qs else {}
+        
+        ob = {
+            "protocol": "hysteria",
+            "settings": {
+                "version": 2,
+                "address": addr,
+                "port": port
+            },
+            "streamSettings": {
+                "network": "hysteria",
+                "security": "tls",
+                "tlsSettings": {
+                    "serverName": pm.get('sni') or addr,
+                    "allowInsecure": pm.get('insecure') in ['1', 'true'],
+                    "alpn": ["h3"]
+                },
+                "hysteriaSettings": {
+                    "version": 2,
+                    "auth": unquote(auth)
+                }
+            }
+        }
+        
+        obfs = pm.get('obfs')
+        obfs_pw = pm.get('obfs-password')
+        if obfs and obfs != "none":
+            ob["streamSettings"]["hysteriaSettings"]["obfuscation"] = {
+                "type": obfs,
+                "password": obfs_pw or ""
+            }
+        return ob
+    except: return None
 
-            json.dump(cfg, tf)
-
-            cfg_path = tf.name
-
-        proc = subprocess.Popen(
-            [XRAY, "-c", cfg_path],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
-        )
-
-        t1 = time.time()
-
-        while time.time() - t1 < REAL_TIMEOUT:
-
-            if proc.poll() is not None:
-                break
-
+def parse_shadowsocks(link):
+    try:
+        r = link[5:]
+        if '#' in r: r = r.rsplit('#', 1)[0]
+        # Some links are fully base64 encoded after ss://, others only userinfo
+        if '@' not in r:
             try:
+                decoded = b64d(r)
+                if '@' in decoded: r = decoded
+            except: pass
+            
+        if '@' in r:
+            userinfo, hp = r.rsplit('@', 1)
+            if ':' not in userinfo:
+                userinfo = b64d(userinfo)
+            
+            if ':' not in userinfo: return None
+            method, password = userinfo.split(':', 1)
+            
+            if '?' in hp: hp = hp.split('?', 1)[0]
+            ps = hp.rsplit(':', 1)
+            addr, port = ps[0], int(ps[1])
+            
+            return {
+                "protocol": "shadowsocks",
+                "settings": {
+                    "servers": [{"address": addr, "port": port, "method": method, "password": password}]
+                }
+            }
+    except: pass
+    return None
 
-                r = requests.get(
-                    "https://www.google.com/generate_204",
-                    proxies={
-                        "http": f"socks5h://127.0.0.1:{port}",
-                        "https": f"socks5h://127.0.0.1:{port}"
-                    },
-                    timeout=2
-                )
+def parse_link(link):
+    if link.startswith("vmess://"): return parse_vmess(link)
+    if link.startswith("vless://"): return parse_vless(link)
+    if link.startswith("trojan://"): return parse_trojan(link)
+    if link.startswith("ss://"): return parse_shadowsocks(link)
+    if link.startswith(("hysteria2://", "hy2://")): return parse_hysteria2(link)
+    return None
 
-                if r.status_code == 204:
-                    return True
-
-            except:
-                pass
-
-            time.sleep(0.2)
-
-    except:
-        return False
-
-    finally:
-
-        try:
-            proc.kill()
-        except:
-            pass
-
-        try:
-            os.remove(cfg_path)
-        except:
-            pass
-
-    return False
-
-# =========================
-# Cache
-# =========================
-
-def load_json(path):
-
-    if not os.path.exists(path):
-        return {}
-
+def test_one(link, port):
+    ob=parse_link(link)
+    if not ob: return -1
+    cfg={"inbounds":[{"port":port,"listen":"127.0.0.1","protocol":"socks","settings":{"udp":True}}],"outbounds":[ob]}
+    cf=f"temp_{port}.json"
+    with open(cf,"w") as f: json.dump(cfg,f)
+    proc=subprocess.Popen([XRAY,"-c",cf],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    lat=-1
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except:
-        return {}
-
-def save_json(path, data):
-
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f)
-
-# =========================
-# Main
-# =========================
+        # High Accuracy Check: Double Verification (Google + Cloudflare)
+        # We try up to 4 times to let Xray core initialize properly
+        for _ in range(4):
+            if proc.poll() is not None: break
+            try:
+                t_req = time.time()
+                # 1st Check: Google Connectivity
+                r1 = requests.get("https://www.google.com/generate_204",
+                                proxies={"http":f"socks5h://127.0.0.1:{port}","https":f"socks5h://127.0.0.1:{port}"},
+                                timeout=5)
+                if r1.status_code == 204:
+                    lat_val = int((time.time() - t_req) * 1000)
+                    
+                    # 2nd Check: Cloudflare (Confirming real routing and stability)
+                    try:
+                        r2 = requests.get("https://1.1.1.1/cdn-cgi/trace",
+                                        proxies={"http":f"socks5h://127.0.0.1:{port}","https":f"socks5h://127.0.0.1:{port}"},
+                                        timeout=4)
+                        if "ip=" in r2.text:
+                            lat = lat_val
+                            break # Confirmed working!
+                    except:
+                        continue # Failed second check, retry
+            except:
+                time.sleep(0.5)
+                continue
+    finally:
+        try:
+            proc.terminate()
+            proc.wait(timeout=1)
+        except:
+            proc.kill()
+        try: os.remove(cf)
+        except: pass
+    
+    # Accuracy Filter: Discard unusable or extremely slow servers (> 5s)
+    if lat > 5000: return -1
+    return lat
 
 def main():
-
-    print("[*] Loading config...")
-
-    with open("remote_config.json", "r", encoding="utf-8") as f:
-        conf = json.load(f)
-
-    subs = conf.get("servers", [])
-
-    links = []
-
+    print("[*] Reading remote_config.json...")
+    if not os.path.exists("remote_config.json"):
+        print("[-] Error: remote_config.json not found!")
+        return
+        
+    with open("remote_config.json","r",encoding="utf-8") as f: conf=json.load(f)
+    subs=conf.get("servers",[])
+    links=[]
     for sub in subs:
-
+        print(f"[*] Fetching: {sub[:80]}...")
         try:
-
-            r = requests.get(sub, timeout=8)
-
-            if r.status_code != 200:
-                continue
-
-            txt = r.text.strip()
-
-            if txt.startswith(("vmess://", "vless://")):
-                lines = txt.splitlines()
-            else:
-                lines = b64d(txt).splitlines()
-
-            for line in lines:
-
-                line = line.strip()
-
-                if line.startswith((
-                    "vmess://",
-                    "vless://",
-                    "trojan://",
-                    "hysteria2://",
-                    "hy2://"
-                )):
-                    links.append(line)
-
-        except:
-            pass
-
-    links = list(dict.fromkeys(links))
-
-    print(f"[*] Total: {len(links)}")
-
-    # =========================
-    # Load cache
-    # =========================
-
-    cache = load_json(CACHE_FILE)
-    dead = load_json(BLACKLIST_FILE)
-
-    now = int(time.time())
-
-    final_links = []
-
-    for x in links:
-
-        if x in dead:
-            if now - dead[x] < 86400:
-                continue
-
-        final_links.append(x)
-
-    random.shuffle(final_links)
-
-    # =========================
-    # FAST FILTER
-    # =========================
-
-    print("[*] Async filtering...")
-
-    filtered = asyncio.run(fast_filter(final_links))
-
-    print(f"[*] Fast alive: {len(filtered)}")
-
-    # =========================
-    # LIMIT
-    # =========================
-
-    filtered = filtered[:3000]
-
-    print(f"[*] Real testing: {len(filtered)}")
-
-    working = []
-
-    # =========================
-    # Batch processing
-    # =========================
-
-    for i in range(0, len(filtered), BATCH_SIZE):
-
-        batch = filtered[i:i+BATCH_SIZE]
-
-        print(f"[*] Batch {i} -> {i+len(batch)}")
-
-        with concurrent.futures.ThreadPoolExecutor(
-            max_workers=MAX_XRAY_WORKERS
-        ) as ex:
-
-            futures = []
-
-            for idx, link in enumerate(batch):
-
-                futures.append(
-                    ex.submit(test_real_server, link, idx)
-                )
-
-            for idx, fut in enumerate(futures):
-
-                ok = fut.result()
-
-                link = batch[idx]
-
-                if ok:
-
-                    working.append(link)
-
-                    cache[link] = now
-
+            r=requests.get(sub,timeout=10)
+            if r.status_code==200:
+                txt=r.text.strip()
+                if any(txt.startswith(p) for p in ["vmess://", "vless://", "trojan://", "ss://", "hysteria2://", "hy2://"]):
+                    lines=txt.splitlines()
                 else:
+                    try: lines=b64d(txt).splitlines()
+                    except: lines=[]
+                for l in lines:
+                    l=l.strip()
+                    if l.startswith(("vmess://","vless://","trojan://","ss://","hysteria2://","hy2://")):
+                        links.append(l)
+        except: pass
+    
+    links=list(dict.fromkeys(links))
+    total=len(links)
+    print(f"\n[*] Total unique links: {total}")
+    print(f"[*] Starting high-accuracy test (20 workers)...\n")
+    
+    working=[]
+    lock=threading.Lock()
+    # Clear previous results
+    with open("working_servers.txt","w",encoding="utf-8") as f: f.write("")
+    
+    def worker(idx_link):
+        idx, link = idx_link
+        port = 10810 + (idx % 1000)
+        proto = link.split("://")[0].upper()
+        lat = test_one(link, port)
+        
+        with lock:
+            status = f"OK ({lat}ms)" if lat > 0 else "FAIL"
+            print(f"[{idx+1}/{total}] {proto} {status}")
+            if lat > 0:
+                working.append(link)
+                with open("working_servers.txt","a",encoding="utf-8") as f:
+                    f.write(link+"\n")
 
-                    dead[link] = now
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=100) as executor:
+            executor.map(worker, enumerate(links))
+    except KeyboardInterrupt:
+        print("\n[!] Interrupted by user. Finalizing results...")
+    
+    print(f"\n{'='*50}")
+    print(f"[*] Results: {len(working)} working servers found")
+    if working:
+        working = list(dict.fromkeys(working))
+        # Optional: sort by something if needed
+        with open("working_servers.txt","w",encoding="utf-8") as f:
+            f.write("\n".join(working))
+        sub_b64=base64.b64encode("\n".join(working).encode()).decode()
+        with open("clean_sub.txt","w",encoding="utf-8") as f:
+            f.write(sub_b64)
+        print(f"[+] Finalized {len(working)} high-accuracy servers to working_servers.txt")
+        print(f"[+] Saved Base64 subscription to clean_sub.txt")
+    else:
+        print("[-] No working servers found.")
 
-        time.sleep(5)
-
-    # =========================
-    # Save
-    # =========================
-
-    save_json(CACHE_FILE, cache)
-    save_json(BLACKLIST_FILE, dead)
-
-    working = list(dict.fromkeys(working))
-
-    with open("working_servers.txt", "w", encoding="utf-8") as f:
-        f.write("\n".join(working))
-
-    print(f"[+] Working: {len(working)}")
-
-if __name__ == "__main__":
+if __name__=="__main__":
     main()
