@@ -1,89 +1,73 @@
-name: V2Ray Daily Checker
+name: V2Ray Daily Validator
 
 on:
   schedule:
-    - cron: '0 3 * * *'
+    - cron: '0 0 * * *' # Runs once every day at 00:00 UTC
+  workflow_dispatch: # Allows manual triggering from the UI
 
-  workflow_dispatch:
-
+# Prevent multiple concurrent runs of this workflow
 concurrency:
   group: v2ray-check
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
-
-  check-servers:
-
+  validate:
     runs-on: ubuntu-latest
-
-    timeout-minutes: 330
-
+    timeout-minutes: 180 # Safety timeout to prevent infinite hangs (Increased for large volume)
     permissions:
-      contents: read
-
+      contents: write
+    
     steps:
-
-      - name: Checkout Repository
+      - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1 # Fetch only the latest commit to save time/bandwidth
 
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-          cache: 'pip'
+          python-version: '3.10'
+          cache: 'pip' # Automatically cache pip dependencies
 
-      - name: Restore Cache
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            good_cache.json
-            dead_cache.json
-            .last_upload_hash
-          key: v2ray-cache
-          restore-keys: |
-            v2ray-cache
-
-      - name: Install Dependencies
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests google-api-python-client google-auth
+          pip install requests PySocks google-api-python-client google-auth-httplib2 google-auth-oauthlib
 
-      - name: Download Xray
+      - name: Cache Xray Core
+        id: cache-xray
+        uses: actions/cache@v4
+        with:
+          path: xray_core
+          key: ${{ runner.os }}-xray-latest
+
+      - name: Download Xray Core (if not cached)
+        if: steps.cache-xray.outputs.cache-hit != 'true'
         run: |
           mkdir -p xray_core
-          cd xray_core
+          curl -L -o xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
+          unzip xray.zip -d xray_core
+          chmod +x xray_core/xray
 
-          wget -O xray.zip \
-          https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
+      - name: Run Validation Script
+        run: python v2ray_tester.py
 
-          unzip xray.zip
-
-          chmod +x xray
-
-          ls -lah
-
-      - name: Prepare Runtime
-        run: |
-          mkdir -p runtime
-          mkdir -p cache
-
-      - name: Run V2Ray Checker
-        run: |
-          python main.py
-        env:
-          PYTHONUNBUFFERED: "1"
-
-      - name: Sync To Google Drive
-        run: |
-          python gdrive_sync.py
+      - name: Sync to Google Drive
         env:
           GDRIVE_SERVICE_ACCOUNT: ${{ secrets.GDRIVE_SERVICE_ACCOUNT }}
+        run: python gdrive_sync.py
 
-      - name: Save Cache
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            good_cache.json
-            dead_cache.json
-            .last_upload_hash
-          key: v2ray-cache
+      - name: Commit and Push Results (GitHub Backup)
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          
+          # Only commit if there are actual changes in the working servers
+          git add working_servers.txt clean_sub.txt
+          if git diff --staged --quiet; then
+            echo "No changes detected, skipping commit."
+          else
+            git commit -m "Auto-update working servers [$(date -u +'%Y-%m-%d %H:%M:%S')] (Daily Check)"
+            git pull --rebase origin main
+            git push origin main
+          fi
