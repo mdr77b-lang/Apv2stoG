@@ -77,3 +77,20 @@ jobs:
           git commit -m "Auto-update working servers [$(date -u +'%Y-%m-%d %H:%M:%S')] (Daily Check)"
           git pull --rebase origin main
           git push origin main
+
+      - name: Deploy to Public Server List (v2Store-app)
+        if: steps.check_changes.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.PUBLIC_REPO_TOKEN }}
+        run: |
+          # Clone the public repository
+          git clone https://${GH_TOKEN}@github.com/mdr77b-lang/v2Store-app.git public_repo
+          # Copy the clean server list to the public repo
+          cp clean_sub.txt public_repo/
+          # Commit and push to public repo
+          cd public_repo
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add clean_sub.txt
+          git commit -m "Update server list [$(date -u +'%Y-%m-%d %H:%M:%S')]"
+          git push origin main
