@@ -1,0 +1,11 @@
+working_servers.txt
+clean_sub.txt
+remote_config.json
+temp_*.json
+xray/
+xray_core/
+*.exe
+*.dat
+*.json
+!remote_config.json
+!.github/workflows/*.yml
