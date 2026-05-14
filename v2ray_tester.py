@@ -246,8 +246,8 @@ def main():
     links = []
 
     # Fetch from subscriptions
-    for sub in subs:
-        print(f"[*] Fetching subscription: {sub[:60]}...")
+    for i, sub in enumerate(subs, 1):
+        print(f"[*] Fetching subscription {i}/{len(subs)}...")
         try:
             r=requests.get(sub,timeout=10)
             if r.status_code==200:
