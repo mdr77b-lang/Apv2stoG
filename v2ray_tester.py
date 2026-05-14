@@ -220,11 +220,8 @@ def test_one(link, port):
     return lat
 
 def main():
-    print("[*] Reading remote_config.json...")
-    if not os.path.exists("remote_config.json"):
-        print("[-] Error: remote_config.json not found!")
-        return
-        
+    print("[*] Loading configuration...")
+    
     # Priority 1: Read from Environment Variable (GitHub Secrets)
     config_str = os.environ.get("APP_CONFIG_JSON")
     conf = {}
@@ -242,7 +239,7 @@ def main():
                 conf=json.load(f)
                 print("[+] Loaded configuration from remote_config.json.")
         else:
-            print("[!] Warning: No configuration found (Secret or local file).")
+            print("[!] Warning: No configuration found in environment or local file.")
             conf = {"servers": []}
 
     subs = conf.get("servers", [])
