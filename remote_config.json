@@ -1,16 +1,4 @@
 {
-  "app": {
-    "status": true,
-    "more_apps_url": "https://moviemack.gamer.gd/portfolio.html"
-  },
-  "ads": {
-    "ad_status": true,
-    "main_ads": "admob",
-    "admob_banner_unit_id": "ca-app-pub-3940256099942544/9214589741",
-    "admob_interstitial_unit_id": "ca-app-pub-3940256099942544/1033173712",
-    "admob_native_unit_id": "ca-app-pub-3940256099942544/2247696110",
-    "admob_app_open_ad_unit_id": "ca-app-pub-3940256099942544/9257395921"
-  },
   "servers": [
 "https://raw.githubusercontent.com/ShatakVPN/ConfigForge-V2Ray/refs/heads/main/configs/at/vless.txt",
 "https://raw.githubusercontent.com/ShatakVPN/ConfigForge-V2Ray/refs/heads/main/configs/au/vless.txt",

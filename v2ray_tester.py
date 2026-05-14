@@ -225,11 +225,32 @@ def main():
         print("[-] Error: remote_config.json not found!")
         return
         
-    with open("remote_config.json","r",encoding="utf-8") as f: conf=json.load(f)
-    subs=conf.get("servers",[])
-    links=[]
+    # Priority 1: Read from Environment Variable (GitHub Secrets)
+    config_str = os.environ.get("APP_CONFIG_JSON")
+    conf = {}
+    if config_str:
+        try:
+            conf = json.loads(config_str)
+            print("[+] Loaded configuration from APP_CONFIG_JSON secret.")
+        except Exception as e:
+            print(f"[-] Error parsing APP_CONFIG_JSON secret: {e}")
+    
+    # Priority 2: Fallback to local file (for local testing)
+    if not conf:
+        if os.path.exists("remote_config.json"):
+            with open("remote_config.json","r",encoding="utf-8") as f: 
+                conf=json.load(f)
+                print("[+] Loaded configuration from remote_config.json.")
+        else:
+            print("[!] Warning: No configuration found (Secret or local file).")
+            conf = {"servers": []}
+
+    subs = conf.get("servers", [])
+    links = []
+
+    # Fetch from subscriptions
     for sub in subs:
-        print(f"[*] Fetching: {sub[:80]}...")
+        print(f"[*] Fetching subscription: {sub[:60]}...")
         try:
             r=requests.get(sub,timeout=10)
             if r.status_code==200:
@@ -243,7 +264,14 @@ def main():
                     l=l.strip()
                     if l.startswith(("vmess://","vless://","trojan://","ss://","hysteria2://","hy2://")):
                         links.append(l)
-        except: pass
+        except Exception as e:
+            print(f"[-] Error fetching {sub[:30]}: {e}")
+    
+    # Priority 3: Add Raw Links from Secret (if any)
+    raw_links_str = os.environ.get("APP_RAW_LINKS")
+    if raw_links_str:
+        print("[+] Adding raw links from APP_RAW_LINKS secret.")
+        links.extend(raw_links_str.splitlines())
     
     links=list(dict.fromkeys(links))
     total=len(links)

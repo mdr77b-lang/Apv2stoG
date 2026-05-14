@@ -49,28 +49,20 @@ jobs:
           chmod +x xray_core/xray
 
       - name: Run Validation Script
+        env:
+          APP_CONFIG_JSON: ${{ secrets.APP_CONFIG_JSON }}
         run: python v2ray_tester.py
 
       - name: Check for changes
         id: check_changes
         run: |
-          git add working_servers.txt clean_sub.txt
-          if git diff --staged --quiet; then
-            echo "changed=false" >> $GITHUB_OUTPUT
-            echo "[*] No changes in server list. Skipping further steps."
-          else
+          if [ -f clean_sub.txt ]; then
             echo "changed=true" >> $GITHUB_OUTPUT
-            echo "[+] Changes detected! Proceeding with update."
+            echo "[+] Results generated! Proceeding with update."
+          else
+            echo "changed=false" >> $GITHUB_OUTPUT
+            echo "[-] No results found."
           fi
-
-      - name: Commit and Push Results (GitHub Backup)
-        if: steps.check_changes.outputs.changed == 'true'
-        run: |
-          git config --local user.email "github-actions[bot]@users.noreply.github.com"
-          git config --local user.name "github-actions[bot]"
-          git commit -m "Auto-update working servers [$(date -u +'%Y-%m-%d %H:%M:%S')] (Daily Check)"
-          git pull --rebase origin main
-          git push origin main
 
       - name: Deploy to Public Server List (v2Store-app)
         if: steps.check_changes.outputs.changed == 'true'
