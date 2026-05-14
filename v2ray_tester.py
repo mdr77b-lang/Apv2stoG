@@ -220,7 +220,7 @@ def test_one(link, port):
     return lat
 
 def main():
-    print("[*] Loading configuration...")
+    print("[!!!] Starting V2Ray Tester V3...")
     
     # Priority 1: Read from Environment Variable (GitHub Secrets)
     config_str = os.environ.get("APP_CONFIG_JSON")
