@@ -1,6 +1,6 @@
 import json,base64,requests,time,subprocess,os,concurrent.futures,threading
 from urllib.parse import unquote, quote
-FORCED_ADDRESS = "jumia.com"
+
 XRAY_BIN = "xray.exe" if os.name == 'nt' else "xray"
 XRAY=os.path.join(os.path.dirname(os.path.abspath(__file__)),"xray_core",XRAY_BIN)
 
@@ -17,7 +17,7 @@ def parse_vmess(link):
         net=d.get("net","tcp")
         obj={
             "protocol":"vmess",
-            "settings":{"vnext":[{"address":FORCED_ADDRESS,"port":int(d.get("port",443)),"users":[{"id":d["id"],"alterId":int(d.get("aid",0)),"security":"auto"}]}]},
+            "settings":{"vnext":[{"address":d["add"],"port":int(d.get("port",443)),"users":[{"id":d["id"],"alterId":int(d.get("aid",0)),"security":"auto"}]}]},
             "streamSettings":{"network":net}
         }
         if d.get("tls")=="tls":
@@ -42,7 +42,7 @@ def parse_vless(link):
         pm=dict(x.split('=',1) for x in qs.split('&') if '=' in x) if qs else {}
         net=pm.get('type','tcp'); sec=pm.get('security','none')
         sni=pm.get('sni',''); fp=pm.get('fp','')
-        ob={"protocol":"vless","settings":{"vnext":[{"address":FORCED_ADDRESS,"port":port,"users":[{"id":uid,"encryption":"none"}]}]},"streamSettings":{"network":net}}
+        ob={"protocol":"vless","settings":{"vnext":[{"address":addr,"port":port,"users":[{"id":uid,"encryption":"none"}]}]},"streamSettings":{"network":net}}
         fl=pm.get('flow','')
         if fl: ob["settings"]["vnext"][0]["users"][0]["flow"]=fl
         if sec=="tls":
@@ -77,7 +77,7 @@ def parse_trojan(link):
         net=pm.get('type','tcp')
         ob={
             "protocol":"trojan",
-            "settings":{"servers":[{"address":FORCED_ADDRESS,"port":port,"password":unquote(pw)}]},
+            "settings":{"servers":[{"address":addr,"port":port,"password":unquote(pw)}]},
             "streamSettings":{"network":net,"security":"tls","tlsSettings":{"serverName":pm.get('sni') or addr,"allowInsecure":True}}
         }
         if net=="ws":
@@ -93,21 +93,17 @@ def parse_hysteria2(link):
         r = link[len(prefix):]
         if '#' in r: r = r.rsplit('#', 1)[0]
         auth, hp = r.split('@', 1)
-
-        if '?' in hp:
-            ap, qs = hp.split('?', 1)
-        else:
-            ap, qs = hp, ''
-
+        if '?' in hp: ap, qs = hp.split('?', 1)
+        else: ap, qs = hp, ''
         ps = ap.rsplit(':', 1)
         addr, port = ps[0], int(ps[1]) if len(ps) > 1 else 443
         pm = dict(x.split('=', 1) for x in qs.split('&') if '=' in x) if qs else {}
-
+        
         ob = {
             "protocol": "hysteria",
             "settings": {
                 "version": 2,
-                "address": FORCED_ADDRESS,
+                "address": addr,
                 "port": port
             },
             "streamSettings": {
@@ -124,20 +120,16 @@ def parse_hysteria2(link):
                 }
             }
         }
-
+        
         obfs = pm.get('obfs')
         obfs_pw = pm.get('obfs-password')
-
         if obfs and obfs != "none":
             ob["streamSettings"]["hysteriaSettings"]["obfuscation"] = {
                 "type": obfs,
                 "password": obfs_pw or ""
             }
-
         return ob
-
-    except:
-        return None
+    except: return None
 
 def parse_shadowsocks(link):
     try:
@@ -165,7 +157,7 @@ def parse_shadowsocks(link):
             return {
                 "protocol": "shadowsocks",
                 "settings": {
-                    "servers": [{"address": FORCED_ADDRESS, "port": port, "method": method, "password": password}]
+                    "servers": [{"address": addr, "port": port, "method": method, "password": password}]
                 }
             }
     except: pass
