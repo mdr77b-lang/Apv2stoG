@@ -1,15 +1,22 @@
-import json,base64,requests,time,subprocess,os,concurrent.futures,threading
-from urllib.parse import unquote, quote
+import json,base64,requests,time,subprocess,os,concurrent.futures,threading,re
+from urllib.parse import unquote, quote, urlparse, parse_qs
 
 XRAY_BIN = "xray.exe" if os.name == 'nt' else "xray"
 XRAY=os.path.join(os.path.dirname(os.path.abspath(__file__)),"xray_core",XRAY_BIN)
+SUPPORTED_SCHEMES=("vmess","vless","trojan","trojan-go","ss","hysteria2","hy2")
+LINK_RE=re.compile(r'(?i)\b(?:'+'|'.join(re.escape(s) for s in SUPPORTED_SCHEMES)+r')://[^\s<>"\']+')
+SUB_RE=re.compile(r'(?i)\bhttps?://[^\s<>"\']+')
 
 def b64d(s):
-    s=s.strip()+'=='
-    try: return base64.b64decode(s).decode('utf-8',errors='ignore')
-    except:
-        try: return base64.urlsafe_b64decode(s).decode('utf-8',errors='ignore')
-        except: return ""
+    s=s.strip().replace('\n','').replace(' ','')
+    for decoder in (base64.b64decode, base64.urlsafe_b64decode):
+        for pad in ("", "=", "=="):
+            try:
+                return decoder(s + pad).decode('utf-8', errors='ignore')
+            except:
+                pass
+    return ""
+
 
 def parse_vmess(link):
     try:
@@ -66,26 +73,38 @@ def parse_vless(link):
 
 def parse_trojan(link):
     try:
-        r=link[9:]
-        if '#' in r: r=r.rsplit('#',1)[0]
-        pw,hp=r.split('@',1)
-        if '?' in hp: ap,qs=hp.split('?',1)
-        else: ap,qs=hp,''
-        ps=ap.rsplit(':',1)
-        addr,port=ps[0],int(ps[1]) if len(ps)>1 else 443
-        pm=dict(x.split('=',1) for x in qs.split('&') if '=' in x) if qs else {}
+        u=urlparse(link)
+        if u.scheme not in ("trojan", "trojan-go"):
+            return None
+        pw=unquote(u.username or "")
+        addr=u.hostname or ""
+        if not pw or not addr:
+            return None
+        port=u.port or 443
+        pm={k:(v[-1] if v else "") for k,v in parse_qs(u.query, keep_blank_values=True).items()}
         net=pm.get('type','tcp')
-        ob={
-            "protocol":"trojan",
-            "settings":{"servers":[{"address":addr,"port":port,"password":unquote(pw)}]},
-            "streamSettings":{"network":net,"security":"tls","tlsSettings":{"serverName":pm.get('sni') or addr,"allowInsecure":True}}
-        }
+        sec=pm.get('security','tls')
+        stream={"network":net}
+        if sec not in ('none','0','false','no'):
+            tls={"serverName":pm.get('sni') or addr,"allowInsecure":pm.get('allowInsecure', pm.get('insecure')) in ['1','true']}
+            fp=pm.get('fp') or pm.get('fingerprint')
+            if fp: tls["fingerprint"]=fp
+            alpn=pm.get('alpn')
+            if alpn: tls["alpn"]=[x.strip() for x in alpn.split(',') if x.strip()]
+            stream.update({"security":"tls","tlsSettings":tls})
         if net=="ws":
-            ob["streamSettings"]["wsSettings"]={"path":unquote(pm.get('path','/')),"headers":{"Host":pm.get('host','')}}
+            h=pm.get('host','')
+            stream["wsSettings"]={"path":unquote(pm.get('path','/')),"headers":{"Host":unquote(h)} if h else {}}
         elif net=="grpc":
-            ob["streamSettings"]["grpcSettings"]={"serviceName":pm.get('serviceName','')}
-        return ob
-    except: return None
+            stream["grpcSettings"]={"serviceName":pm.get('serviceName','')}
+        return {
+            "protocol":"trojan",
+            "settings":{"servers":[{"address":addr,"port":port,"password":pw}]},
+            "streamSettings":stream
+        }
+    except:
+        return None
+
 
 def parse_hysteria2(link):
     try:
@@ -166,10 +185,93 @@ def parse_shadowsocks(link):
 def parse_link(link):
     if link.startswith("vmess://"): return parse_vmess(link)
     if link.startswith("vless://"): return parse_vless(link)
-    if link.startswith("trojan://"): return parse_trojan(link)
+    if link.startswith(("trojan://", "trojan-go://")): return parse_trojan(link)
     if link.startswith("ss://"): return parse_shadowsocks(link)
     if link.startswith(("hysteria2://", "hy2://")): return parse_hysteria2(link)
     return None
+
+def extract_links(txt):
+    return [l.strip() for l in LINK_RE.findall(txt or "") if l.strip()]
+
+def extract_subscriptions(txt):
+    return [l.strip() for l in SUB_RE.findall(txt or "") if l.strip()]
+
+def unique_preserve(seq):
+    return list(dict.fromkeys(seq))
+
+def shorten(s, n=90):
+    s=s or ""
+    return s if len(s)<=n else s[:n]+"..."
+
+def normalize_config(conf):
+    servers=[]
+    raw_links=[]
+    if isinstance(conf, str):
+        try:
+            conf=json.loads(conf)
+        except:
+            return {"servers": extract_subscriptions(conf), "raw_links": extract_links(conf)}
+    if isinstance(conf, list):
+        text="\n".join(str(x) for x in conf if isinstance(x,str))
+        return {"servers": extract_subscriptions(text), "raw_links": extract_links(text)}
+    if isinstance(conf, dict):
+        def add_server_value(val):
+            nonlocal servers, raw_links
+            if isinstance(val, str):
+                found_subs=extract_subscriptions(val)
+                if found_subs:
+                    servers.extend(found_subs)
+                else:
+                    raw_links.extend(extract_links(val))
+            elif isinstance(val, list):
+                for item in val:
+                    if isinstance(item, str):
+                        found_subs=extract_subscriptions(item)
+                        if found_subs:
+                            servers.extend(found_subs)
+                        else:
+                            raw_links.extend(extract_links(item))
+        for key in ("servers","subscriptions","subs","subscription_urls"):
+            add_server_value(conf.get(key))
+        for key in ("raw_links","links","proxy_links"):
+            val=conf.get(key)
+            if isinstance(val, str):
+                raw_links.extend(extract_links(val))
+            elif isinstance(val, list):
+                raw_links.extend(str(x) for x in val if isinstance(x,str))
+    return {"servers": unique_preserve(servers), "raw_links": unique_preserve(raw_links)}
+
+def load_config():
+    conf={}
+    for name in ("APP_CONFIG_JSON","REMOTE_CONFIG_JSON","CONFIG_JSON","V2RAY_CONFIG_JSON"):
+        config_str=os.environ.get(name)
+        if not config_str:
+            continue
+        try:
+            conf=normalize_config(json.loads(config_str))
+            print(f"[+] Loaded configuration from {name} secret.")
+            break
+        except Exception as e:
+            fallback=normalize_config(config_str)
+            if fallback.get("servers") or fallback.get("raw_links"):
+                conf=fallback
+                print(f"[+] Loaded plain URL/link list from {name} secret.")
+                break
+            print(f"[-] Error parsing {name} secret: {e}")
+    if not conf:
+        if os.path.exists("remote_config.json"):
+            with open("remote_config.json","r",encoding="utf-8") as f:
+                conf=normalize_config(json.load(f))
+                print("[+] Loaded configuration from remote_config.json.")
+    if not conf:
+        print("[!] Warning: No configuration found in environment or local file.")
+        conf={"servers": [], "raw_links": []}
+    raw_links_str=os.environ.get("APP_RAW_LINKS") or os.environ.get("RAW_LINKS") or os.environ.get("V2RAY_RAW_LINKS")
+    if raw_links_str:
+        conf["raw_links"]=unique_preserve(conf.get("raw_links", []) + extract_links(raw_links_str))
+        print("[+] Adding raw links from environment secret.")
+    return conf
+
 
 def rename_link(link, new_name):
     try:
@@ -196,7 +298,12 @@ def test_one(link, port):
     cfg={"inbounds":[{"port":port,"listen":"127.0.0.1","protocol":"socks","settings":{"udp":True}}],"outbounds":[ob]}
     cf=f"temp_{port}.json"
     with open(cf,"w") as f: json.dump(cfg,f)
-    proc=subprocess.Popen([XRAY,"-c",cf],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    try:
+        proc=subprocess.Popen([XRAY,"-c",cf],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    except Exception:
+        try: os.remove(cf)
+        except: pass
+        return -1
     lat=-1
     try:
         # High Accuracy Check: Double Verification (Google + Cloudflare)
@@ -238,61 +345,79 @@ def test_one(link, port):
     if lat > 5000: return -1
     return lat
 
+def fetch_one_subscription(sub):
+    retries=int(os.environ.get("FETCH_RETRIES","2"))
+    last_err=""
+    for attempt in range(1, retries+1):
+        try:
+            r=requests.get(sub,timeout=15,headers={"User-Agent":"V2Ray-Tester/1.0"})
+            if r.status_code!=200:
+                raise Exception(f"HTTP {r.status_code}")
+            txt=r.text.strip()
+            decoded=b64d(txt)
+            if "://" in decoded:
+                txt=decoded
+            return sub, extract_links(txt), None
+        except Exception as e:
+            last_err=str(e)
+            if attempt < retries:
+                time.sleep(0.75)
+    return sub, [], last_err
+
+def fetch_all_subscriptions(subs):
+    links=[]
+    if not subs:
+        return links
+    workers=min(int(os.environ.get("FETCH_WORKERS","12")), len(subs))
+    print(f"[*] Fetching {len(subs)} subscriptions with {workers} workers...")
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+        for sub, found, err in executor.map(fetch_one_subscription, subs):
+            if err:
+                print(f"[-] Error fetching {shorten(sub)}: {err}")
+            else:
+                print(f"[+] {shorten(sub)} -> {len(found)} links")
+            links.extend(found)
+    return links
+
+def protocol_counts(links):
+    counts={}
+    for link in links:
+        proto=link.split("://",1)[0].upper()
+        counts[proto]=counts.get(proto,0)+1
+    return counts
+
+def print_protocol_summary(links):
+    counts=protocol_counts(links)
+    if not counts:
+        return
+    parts=[f"{k}:{v}" for k,v in sorted(counts.items())]
+    print("[*] Protocol counts: " + ", ".join(parts))
+
 def main():
     print("[!!!] Starting V2Ray Tester V3...")
     
-    # Priority 1: Read from Environment Variable (GitHub Secrets)
-    config_str = os.environ.get("APP_CONFIG_JSON")
-    conf = {}
-    if config_str:
-        try:
-            conf = json.loads(config_str)
-            print("[+] Loaded configuration from APP_CONFIG_JSON secret.")
-        except Exception as e:
-            print(f"[-] Error parsing APP_CONFIG_JSON secret: {e}")
-    
-    # Priority 2: Fallback to local file (for local testing)
-    if not conf:
-        if os.path.exists("remote_config.json"):
-            with open("remote_config.json","r",encoding="utf-8") as f: 
-                conf=json.load(f)
-                print("[+] Loaded configuration from remote_config.json.")
-        else:
-            print("[!] Warning: No configuration found in environment or local file.")
-            conf = {"servers": []}
+    conf=load_config()
+    subs=conf.get("servers", [])
+    raw_links=conf.get("raw_links", [])
+    links=[]
 
-    subs = conf.get("servers", [])
-    links = []
-
-    # Fetch from subscriptions
-    for i, sub in enumerate(subs, 1):
-        print(f"[*] Fetching subscription {i}/{len(subs)}...")
-        try:
-            r=requests.get(sub,timeout=10)
-            if r.status_code==200:
-                txt=r.text.strip()
-                if any(txt.startswith(p) for p in ["vmess://", "vless://", "trojan://", "ss://", "hysteria2://", "hy2://"]):
-                    lines=txt.splitlines()
-                else:
-                    try: lines=b64d(txt).splitlines()
-                    except: lines=[]
-                for l in lines:
-                    l=l.strip()
-                    if l.startswith(("vmess://","vless://","trojan://","ss://","hysteria2://","hy2://")):
-                        links.append(l)
-        except Exception as e:
-            print(f"[-] Error fetching {sub[:30]}: {e}")
+    links.extend(fetch_all_subscriptions(subs))
+    if raw_links:
+        print(f"[+] Adding {len(raw_links)} raw links from secret.")
+        links.extend(raw_links)
     
-    # Priority 3: Add Raw Links from Secret (if any)
-    raw_links_str = os.environ.get("APP_RAW_LINKS")
-    if raw_links_str:
-        print("[+] Adding raw links from APP_RAW_LINKS secret.")
-        links.extend(raw_links_str.splitlines())
-    
-    links=list(dict.fromkeys(links))
+    links=unique_preserve(links)
     total=len(links)
     print(f"\n[*] Total unique links: {total}")
-    print(f"[*] Starting high-accuracy test (20 workers)...\n")
+    print_protocol_summary(links)
+    if total==0:
+        print("[-] No proxy links were found. Check the GitHub secret structure.")
+        with open("working_servers.txt","w",encoding="utf-8") as f: f.write("")
+        with open("clean_sub.txt","w",encoding="utf-8") as f: f.write("")
+        return
+    
+    workers=int(os.environ.get("TEST_WORKERS","32"))
+    print(f"[*] Starting high-accuracy test ({workers} workers)...\n")
     
     working=[]
     lock=threading.Lock()
@@ -301,7 +426,8 @@ def main():
     
     def worker(idx_link):
         idx, link = idx_link
-        port = 10810 + (idx % 1000)
+        base_port=int(os.environ.get("BASE_PORT","10810"))
+        port=base_port + idx
         proto = link.split("://")[0].upper()
         lat = test_one(link, port)
         
@@ -315,16 +441,16 @@ def main():
                     f.write(renamed+"\n")
 
     try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=100) as executor:
-            executor.map(worker, enumerate(links))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+            for _ in executor.map(worker, enumerate(links)):
+                pass
     except KeyboardInterrupt:
         print("\n[!] Interrupted by user. Finalizing results...")
     
     print(f"\n{'='*50}")
     print(f"[*] Results: {len(working)} working servers found")
     if working:
-        working = list(dict.fromkeys(working))
-        # Optional: sort by something if needed
+        working = unique_preserve(working)
         with open("working_servers.txt","w",encoding="utf-8") as f:
             f.write("\n".join(working))
         sub_b64=base64.b64encode("\n".join(working).encode()).decode()
@@ -333,6 +459,7 @@ def main():
         print(f"[+] Finalized {len(working)} high-accuracy servers to working_servers.txt")
         print(f"[+] Saved Base64 subscription to clean_sub.txt")
     else:
+        with open("clean_sub.txt","w",encoding="utf-8") as f: f.write("")
         print("[-] No working servers found.")
 
 if __name__=="__main__":
